@@ -1,0 +1,146 @@
+version: '3.8'
+
+# ----------------------------------------------------
+# CONFIGURAÇÕES COMUNS DO AIRFLOW (LOCALEXECUTOR)
+# ----------------------------------------------------
+x-airflow-common:
+  &airflow-common
+
+  # Usa a imagem customizada que você construiu com o Dockerfile
+  build: . 
+  
+  # Carrega variáveis de ambiente (necessário para senhas do Admin)
+  env_file:
+    - .env 
+
+  environment:
+    &airflow-common-env
+    # Troca para LocalExecutor (mais simples para desenvolvimento)
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor 
+    
+    # Conexão do Airflow para seu próprio MetaDatabase (Postgres)
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+
+    # Configurações de Segurança e UI
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: '6r2pK5gLEUmyfZFev3MHGD3eOqlXiY3jZoZN4ggJHCk='
+    AIRFLOW__WEBSERVER__SECRET_KEY: '54c71d8c5cd1f363e7c35a1ca27dfc04d8715b290d8d276b1c75efcebe6f9526'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'False'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    
+    # Airflow Admin User (Definido no .env e referenciado no airflow-init)
+    _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow} 
+    _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow} 
+
+  volumes:
+    # Mapeamentos essenciais
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    sqlserver: # Depende do SQL Server
+      condition: service_started 
+
+# ----------------------------------------------------
+# SERVIÇOS (BANCOS DE DADOS E AIRFLOW)
+# ----------------------------------------------------
+services:
+  # 1. POSTGRES (Metastore e Banco de Dados de ORIGEM)
+  postgres:
+    image: postgres:13
+    ports:
+      - "5432:5432" # Porta exposta para acesso via DBeaver
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow # Banco usado pelo Airflow Metastore
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # 2. SQL SERVER (Banco de Dados de DESTINO)
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    ports:
+      - "1433:1433" # Porta exposta para acesso via Azure Data Studio/DBeaver
+    environment:
+      ACCEPT_EULA: Y
+      SA_PASSWORD: ${MSSQL_SA_PASSWORD:-YourStrongPass123!} # Use .env para a senha
+    volumes:
+      - sqlserver-db-volume:/var/opt/mssql
+    restart: always
+    
+  # 3. AIRFLOW WEBSERVER (UI)
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 4. AIRFLOW SCHEDULER (Agenda e Executa DAGs)
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 5. AIRFLOW INIT (Migra o DB e Cria Usuário Admin)
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        # Verifica a versão do Airflow, migra o DB e cria o usuário Admin.
+        # Simplifiquei o comando de init, pois o LocalExecutor não usa Celery/Redis
+        /entrypoint bash -c "exec airflow db migrate && exec airflow users create -u ${AIRFLOW_ADMIN_USER:-airflow} -p ${AIRFLOW_ADMIN_PASSWORD:-airflow} -r Admin -e admin@airflow.com -f Admin -l User"
+    
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      # Remove as variáveis do Celery/Worker
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources # Volume temporário para o init
+
+# ----------------------------------------------------
+# VOLUMES
+# ----------------------------------------------------
+volumes:
+  postgres-db-volume:
+  sqlserver-db-volume: # Novo volume para persistir dados do SQL Server
