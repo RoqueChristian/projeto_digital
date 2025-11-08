@@ -1,0 +1,14 @@
+apache-airflow-providers-postgres
+apache-airflow-providers-microsoft-sql
+psycopg2-binary
+pyodbc
+sqlalchemy
+pandas
+numpy
+openpyxl
+xlsxwriter
+fastparquet
+pyarrow
+python-dotenv
+streamlit
+plotly
