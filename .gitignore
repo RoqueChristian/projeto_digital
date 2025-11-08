@@ -1,0 +1,14 @@
+# Docker / Logs / Dados
+logs/
+.env
+*.log
+
+
+# Python
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Airflow
+dags/logs/
