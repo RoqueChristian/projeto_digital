@@ -1,4 +1,4 @@
-# --- INSTALAÇÃO DE DRIVERS NATIVOS (USER root) ---
+FROM apache/airflow:2.8.3-python3.11
 
 USER root
 
