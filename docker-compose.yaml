@@ -10,7 +10,6 @@ x-airflow-common:
   build: . 
   
   # Garante que o entrypoint original da imagem do Airflow seja usado.
-  # (Mantemos isso para os demais serviços, mas o 'init' o ignora no 'command')
   entrypoint: /entrypoint
 
   # Carrega variáveis de ambiente (necessário para senhas do Admin)
@@ -39,6 +38,12 @@ x-airflow-common:
     # Variável para o e-mail do admin
     AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com}
 
+    # --- CRÍTICO: Criação automática de conexões ---
+    # Conexão para o banco de dados de origem (PostgreSQL)
+    AIRFLOW_CONN_POSTGRES_SOURCE: "postgres://airflow:airflow@postgres:5432/airflow"
+    # Conexão para o banco de dados de destino (SQL Server)
+    AIRFLOW_CONN_MSSQL_TARGET: "mssql://sa:${MSSQL_SA_PASSWORD:-YourStrongPass123!}@sqlserver:1433/?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
+
   volumes:
     # Mapeamentos essenciais
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
@@ -54,13 +59,13 @@ x-airflow-common:
     sqlserver: # Depende do SQL Server
       condition: service_started 
 
----
-## ⚙️ Serviços
-
+# ----------------------------------------------------
+# SERVIÇOS (BANCOS DE DADOS E AIRFLOW)
+# ----------------------------------------------------
 services:
   # 1. POSTGRES (Metastore e Banco de Dados de ORIGEM)
   postgres:
-    image: postgres:13
+    image: postgres:16
     ports:
       - "5432:5432"
     environment:
@@ -78,7 +83,7 @@ services:
 
   # 2. SQL SERVER (Banco de Dados de DESTINO)
   sqlserver:
-    image: mcr.microsoft.com/mssql/server:2019-latest
+    image: mcr.microsoft.com/mssql/server:2022-latest
     ports:
       - "1433:1433"
     environment:
@@ -110,11 +115,12 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    # CORREÇÃO: Usa o healthcheck correto para o scheduler do Airflow 2.x+, via CLI.
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$$(hostname)\""]
       interval: 30s
       timeout: 10s
-      retries: 5
+      retries: 3
       start_period: 30s
     restart: always
     depends_on:
@@ -129,26 +135,14 @@ services:
     command:
       - bash
       - -c
-      # CRÍTICO: Chamamos o binário do Airflow diretamente no venv para ignorar o problema de PATH.
-      - '/opt/airflow/venv/bin/airflow db migrate && /opt/airflow/venv/bin/airflow users create --username ${AIRFLOW_ADMIN_USER:-airflow} --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} --role Admin --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} --firstname Admin --lastname User'
-    
-    environment:
-      <<: *airflow-common-env
-      _AIRFLOW_DB_MIGRATE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _PIP_ADDITIONAL_REQUIREMENTS: ''
+      # CORREÇÃO FINAL: Usamos o caminho absoluto correto para o executável do Airflow,
+      # conforme indicado pelos logs e pelo comportamento padrão do pip para o usuário 'airflow'.
+      - '/home/airflow/.local/bin/airflow db migrate && /home/airflow/.local/bin/airflow users create --username ${AIRFLOW_ADMIN_USER:-airflow} --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} --role Admin --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} --firstname Admin --lastname User'
 
-    # Define o usuário como o UID do Airflow (50000) para evitar problemas de permissão com volumes.
-    user: "${AIRFLOW_UID:-50000}"
-    volumes:
-      # Volumes essenciais para que o init possa escrever o config e acessar a DAG
-      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-      - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
 
----
-## 💾 Volumes
-
+# ----------------------------------------------------
+# VOLUMES
+# ----------------------------------------------------
 volumes:
   postgres-db-volume:
   sqlserver-db-volume:
-

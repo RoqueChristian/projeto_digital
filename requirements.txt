@@ -1,7 +1,7 @@
+# As versões de 'apache-airflow-providers-postgres', 'psycopg2-binary', 'pyodbc' e 'sqlalchemy'
+# são gerenciadas pelo arquivo de restrições do Airflow para garantir compatibilidade.
+# Apenas bibliotecas de análise de dados e outras não diretamente ligadas ao core do Airflow são listadas aqui.
 apache-airflow-providers-postgres
-psycopg2-binary
-pyodbc
-sqlalchemy
 pandas
 numpy
 openpyxl
