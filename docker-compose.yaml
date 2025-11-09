@@ -131,13 +131,28 @@ services:
   # 5. AIRFLOW INIT (Migra o DB e Cria Usuário Admin)
   airflow-init:
     <<: *airflow-common
-    # O entrypoint padrão do Airflow é mantido
     command:
       - bash
       - -c
-      # CORREÇÃO FINAL: Usamos o caminho absoluto correto para o executável do Airflow,
-      # conforme indicado pelos logs e pelo comportamento padrão do pip para o usuário 'airflow'.
-      - '/home/airflow/.local/bin/airflow db migrate && /home/airflow/.local/bin/airflow users create --username ${AIRFLOW_ADMIN_USER:-airflow} --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} --role Admin --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} --firstname Admin --lastname User'
+      - |
+        # CRÍTICO: Garante permissão de escrita para o usuário Airflow (UID 50000) no volume de logs
+        chown -R ${AIRFLOW_UID:-50000}:0 /opt/airflow/logs
+        
+        # Executa as tarefas de inicialização: migrar DB e criar usuário Admin
+        /home/airflow/.local/bin/airflow db migrate
+        /home/airflow/.local/bin/airflow users create \
+          --username ${AIRFLOW_ADMIN_USER:-airflow} \
+          --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} \
+          --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} \
+          --firstname Admin \
+          --lastname User
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      sqlserver:
+        condition: service_started
 
 
 # ----------------------------------------------------
