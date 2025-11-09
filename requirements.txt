@@ -1,5 +1,5 @@
 apache-airflow-providers-postgres
-apache-airflow-providers-microsoft-sql
+apache-airflow-providers-mssql
 psycopg2-binary
 pyodbc
 sqlalchemy
