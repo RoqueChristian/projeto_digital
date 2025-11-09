@@ -9,6 +9,10 @@ x-airflow-common:
   # Usa a imagem customizada que você construiu com o Dockerfile
   build: . 
   
+  # Garante que o entrypoint original da imagem do Airflow seja usado.
+  # (Mantemos isso para os demais serviços, mas o 'init' o ignora no 'command')
+  entrypoint: /entrypoint
+
   # Carrega variáveis de ambiente (necessário para senhas do Admin)
   env_file:
     - .env 
@@ -32,6 +36,8 @@ x-airflow-common:
     # Airflow Admin User (Definido no .env e referenciado no airflow-init)
     _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow} 
     _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow} 
+    # Variável para o e-mail do admin
+    AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com}
 
   volumes:
     # Mapeamentos essenciais
@@ -48,19 +54,19 @@ x-airflow-common:
     sqlserver: # Depende do SQL Server
       condition: service_started 
 
-# ----------------------------------------------------
-# SERVIÇOS (BANCOS DE DADOS E AIRFLOW)
-# ----------------------------------------------------
+---
+## ⚙️ Serviços
+
 services:
   # 1. POSTGRES (Metastore e Banco de Dados de ORIGEM)
   postgres:
     image: postgres:13
     ports:
-      - "5432:5432" # Porta exposta para acesso via DBeaver
+      - "5432:5432"
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow # Banco usado pelo Airflow Metastore
+      POSTGRES_DB: airflow 
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
@@ -74,10 +80,10 @@ services:
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2019-latest
     ports:
-      - "1433:1433" # Porta exposta para acesso via Azure Data Studio/DBeaver
+      - "1433:1433"
     environment:
       ACCEPT_EULA: Y
-      SA_PASSWORD: ${MSSQL_SA_PASSWORD:-YourStrongPass123!} # Use .env para a senha
+      SA_PASSWORD: ${MSSQL_SA_PASSWORD:-YourStrongPass123!}
     volumes:
       - sqlserver-db-volume:/var/opt/mssql
     restart: always
@@ -119,28 +125,30 @@ services:
   # 5. AIRFLOW INIT (Migra o DB e Cria Usuário Admin)
   airflow-init:
     <<: *airflow-common
-    entrypoint: /bin/bash
+    # O entrypoint padrão do Airflow é mantido
     command:
+      - bash
       - -c
-      - |
-        # Verifica a versão do Airflow, migra o DB e cria o usuário Admin.
-        # Simplifiquei o comando de init, pois o LocalExecutor não usa Celery/Redis
-        /entrypoint bash -c "exec airflow db migrate && exec airflow users create -u ${AIRFLOW_ADMIN_USER:-airflow} -p ${AIRFLOW_ADMIN_PASSWORD:-airflow} -r Admin -e admin@airflow.com -f Admin -l User"
+      # CRÍTICO: Chamamos o binário do Airflow diretamente no venv para ignorar o problema de PATH.
+      - '/opt/airflow/venv/bin/airflow db migrate && /opt/airflow/venv/bin/airflow users create --username ${AIRFLOW_ADMIN_USER:-airflow} --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} --role Admin --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} --firstname Admin --lastname User'
     
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
-      # Remove as variáveis do Celery/Worker
       _PIP_ADDITIONAL_REQUIREMENTS: ''
 
-    user: "0:0"
+    # Define o usuário como o UID do Airflow (50000) para evitar problemas de permissão com volumes.
+    user: "${AIRFLOW_UID:-50000}"
     volumes:
-      - ${AIRFLOW_PROJ_DIR:-.}:/sources # Volume temporário para o init
+      # Volumes essenciais para que o init possa escrever o config e acessar a DAG
+      - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+      - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
 
-# ----------------------------------------------------
-# VOLUMES
-# ----------------------------------------------------
+---
+## 💾 Volumes
+
 volumes:
   postgres-db-volume:
-  sqlserver-db-volume: # Novo volume para persistir dados do SQL Server
+  sqlserver-db-volume:
+
