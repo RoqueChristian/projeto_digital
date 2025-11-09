@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import pendulum
 
 from airflow.decorators import dag, task
@@ -25,23 +26,22 @@ def check_db_connections_dag():
     @task
     def check_postgres_source_connection():
         """Verifica a conexão com o PostgreSQL de Origem."""
-        print(f"Tentando conectar ao PostgreSQL com Conn ID: {POSTGRES_CONN_ID}")
-        
+        logging.info(f"Tentando conectar ao PostgreSQL com Conn ID: {POSTGRES_CONN_ID}")
         # Cria uma instância do Hook usando o ID de Conexão
         pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         
         # Executa uma consulta de teste
         try:
             pg_hook.run("SELECT 1", autocommit=True)
-            print("✅ Conexão com o PostgreSQL de Origem BEM-SUCEDIDA.")
+            logging.info("✅ Conexão com o PostgreSQL de Origem BEM-SUCEDIDA.")
         except Exception as e:
-            print(f"❌ ERRO ao conectar ao PostgreSQL de Origem: {e}")
+            logging.error(f"❌ ERRO ao conectar ao PostgreSQL com Conn ID '{POSTGRES_CONN_ID}': {e}")
             raise
 
     @task
     def check_mssql_target_connection():
         """Verifica a conexão com o SQL Server de Destino."""
-        print(f"Tentando conectar ao SQL Server com Conn ID: {MSSQL_CONN_ID}")
+        logging.info(f"Tentando conectar ao SQL Server com Conn ID: {MSSQL_CONN_ID}")
         
         # Cria uma instância do Hook usando o ID de Conexão
         mssql_hook = MsSqlHook(mssql_conn_id=MSSQL_CONN_ID)
@@ -49,10 +49,10 @@ def check_db_connections_dag():
         # Executa uma consulta de teste
         try:
             mssql_hook.run("SELECT 1", autocommit=True)
-            print("✅ Conexão com o SQL Server de Destino BEM-SUCEDIDA.")
+            logging.info("✅ Conexão com o SQL Server de Destino BEM-SUCEDIDA.")
         except Exception as e:
             # Em caso de falha, exibe o erro completo para debug
-            print(f"❌ ERRO ao conectar ao SQL Server de Destino: {e}")
+            logging.error(f"❌ ERRO ao conectar ao SQL Server com Conn ID '{MSSQL_CONN_ID}': {e}")
             raise
 
     # Define a ordem de execução das tarefas
