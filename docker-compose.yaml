@@ -1,79 +1,47 @@
-version: '3.8'
-
-# ----------------------------------------------------
-# CONFIGURAÇÕES COMUNS DO AIRFLOW (LOCALEXECUTOR)
-# ----------------------------------------------------
 x-airflow-common:
   &airflow-common
-
-  # Usa a imagem customizada que você construiu com o Dockerfile
-  build: . 
-  
-  # Garante que o entrypoint original da imagem do Airflow seja usado.
-  entrypoint: /entrypoint
-
-  # Carrega variáveis de ambiente (necessário para senhas do Admin e ETL)
+  build: .
   env_file:
-    - .env 
-
+    - .env
   environment:
     &airflow-common-env
-    # Troca para LocalExecutor (mais simples para desenvolvimento)
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor 
-    
-    # Conexão do Airflow para seu próprio MetaDatabase (Postgres)
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    
-    # Configurações de Segurança e UI (Usa a variável do DB do Airflow Metastore)
-    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: '6r2pK5gLEUmyfZFev3MHGD3eOqlXiY3jZoZN4ggJHCk='
     AIRFLOW__WEBSERVER__SECRET_KEY: '54c71d8c5cd1f363e7c35a1ca27dfc04d8715b290d8d276b1c75efcebe6f9526'
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'False'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
-    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
-    
-    # Airflow Admin User (Definido no .env e referenciado no airflow-init)
-    _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow} 
-    _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow} 
-    AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com}
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.session'
 
-    # --- CRÍTICO: Criação automática de conexões (Lidas pelo Hook) ---
-    # CORREÇÃO 1: Remove a porta do Host do Postgres da variável de conexão
-    # O Hook do Postgres lida com a conexão interna pelo nome do serviço 'postgres'
-    AIRFLOW_CONN_POSTGRES_SOURCE: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
-    
-    # Conexão para o banco de dados de destino (SQL Server)
-    # Usa variáveis do .env (ETL_MSSQL_USER e ETL_MSSQL_PASSWORD)
-    AIRFLOW_CONN_MSSQL_TARGET: mssql://${ETL_MSSQL_USER}:${ETL_MSSQL_PASSWORD}@sqlserver:1433/DataWarehouse
+    AIRFLOW_CONN_POSTGRES_SOURCE: >
+      postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+
+    # ✅ SQL Server no Windows (porta 1450) com usuário sa
+    AIRFLOW_CONN_MSSQL_TARGET: >
+      mssql+pyodbc://sa:${MSSQL_PASSWORD}@host.docker.internal:1450/DataWarehouse
+      ?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
 
   volumes:
-    # Mapeamentos essenciais
-    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
-    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    - ./dags:/opt/airflow/dags:ro
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./data:/opt/airflow/data
 
   depends_on:
-    &airflow-common-depends-on
     postgres:
       condition: service_healthy
-    sqlserver:
-      condition: service_started 
 
-# ----------------------------------------------------
-# SERVIÇOS (BANCOS DE DADOS E AIRFLOW)
-# ----------------------------------------------------
 services:
-  # 1. POSTGRES (Metastore e Banco de Dados de ORIGEM)
+
   postgres:
     image: postgres:16
+    container_name: airflow-postgres
     ports:
       - "5432:5432"
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow 
+      POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
@@ -83,85 +51,39 @@ services:
       start_period: 5s
     restart: always
 
-  # 2. SQL SERVER (Banco de Dados de DESTINO)
-  sqlserver:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    ports:
-      - "1433:1433"
-    environment:
-      ACCEPT_EULA: Y
-      SA_PASSWORD: ${MSSQL_SA_PASSWORD:-YourStrongPass123!}
-      # CORREÇÃO 2: CRÍTICO - Força o SQL Server a aceitar Autenticação SQL Server,
-      # resolvendo o erro 18456 (Login failed for user 'etl_airflow').
-      MSSQL_AUTHENTICATION_MODE: 'SQL' 
-    volumes:
-      - sqlserver-db-volume:/var/opt/mssql
-    restart: always
-    
-  # 3. AIRFLOW WEBSERVER (UI)
   airflow-webserver:
     <<: *airflow-common
     command: webserver
     ports:
       - "8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
-  # 4. AIRFLOW SCHEDULER (Agenda e Executa DAGs)
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
-    healthcheck:
-      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$$(hostname)\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
-  # 5. AIRFLOW INIT (Migra o DB e Cria Usuário Admin)
   airflow-init:
     <<: *airflow-common
-    command:
-      - bash
-      - -c
-      - |
-        # CRÍTICO: Garante permissão de escrita para o usuário Airflow (UID 50000) no volume de logs
-        chown -R ${AIRFLOW_UID:-50000}:0 /opt/airflow/logs
-        
-        # Executa as tarefas de inicialização: migrar DB e criar usuário Admin
-        /home/airflow/.local/bin/airflow db migrate
-        /home/airflow/.local/lib/python3.11/site-packages/airflow/cli/cli_parser.py users create \
-          --username ${AIRFLOW_ADMIN_USER:-airflow} \
-          --password ${AIRFLOW_ADMIN_PASSWORD:-airflow} \
-          --role Admin \
-          --email ${AIRFLOW_ADMIN_EMAIL:-admin@airflow.com} \
-          --firstname Admin \
-          --lastname User
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username ${AIRFLOW_ADMIN_USER} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Admin --lastname User --role Admin --email ${AIRFLOW_ADMIN_EMAIL}
+      "
     restart: on-failure
     depends_on:
       postgres:
         condition: service_healthy
-      sqlserver:
-        condition: service_started
 
-
-# ----------------------------------------------------
-# VOLUMES
-# ----------------------------------------------------
 volumes:
   postgres-db-volume:
-  sqlserver-db-volume:
