@@ -16,13 +16,13 @@ RAW_STAGING_PATH = "/tmp/contas_receber_raw.csv"
 TRANSFORMED_STAGING_PATH = "/tmp/contas_receber_transformed.csv"
 
 @dag(
-    dag_id="etl_fatocontasreceber_pg_to_mssql_v2", 
+    dag_id="etl_fatocontasreceber_pg_to_mssql_incremental", # Nome ajustado
     schedule=None,
     start_date=pendulum.datetime(2025, 1, 1),
     catchup=False,
-    tags=["etl", "fato", "contas_receber", "final_identity_fix"],
+    tags=["etl", "fato", "contas_receber", "incremental"],
 )
-def etl_fato_contas_receber_v2():
+def etl_fato_contas_receber_incremental():
     
     def get_lookup_dict(mssql_hook, table_name, business_key, surrogate_key):
         """Função auxiliar para obter dicionários de lookup de Dimensões."""
@@ -31,13 +31,14 @@ def etl_fato_contas_receber_v2():
             print(f"Aviso: Tabela de Dimensão {table_name} está vazia.")
             return {}
         
+        # Converte a chave de negócio para string se for DimTempo (data)
         if business_key == 'data':
              df_lookup[business_key] = df_lookup[business_key].astype(str)
         
         return pd.Series(df_lookup[surrogate_key].values, index=df_lookup[business_key]).to_dict()
 
 # --------------------------------------------------------------------------------------
-    # --- 1. EXTRAÇÃO: PostgreSQL (Grava RAW no Staging File) ---
+    # --- 1. EXTRAÇÃO: PostgreSQL (Full Load para garantir novos Fatos) ---
     @task
     def extract_postgres_to_file():
         pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
@@ -51,12 +52,15 @@ def etl_fato_contas_receber_v2():
             FROM financeiro.conta_receber cr
             INNER JOIN vendas.parcela p ON p.id = cr.id_parcela
             INNER JOIN vendas.nota_fiscal nf ON nf.id = p.id_nota_fiscal; 
+            -- ATENÇÃO: Nenhuma cláusula WHERE para filtro incremental baseado em tempo.
+            -- O filtro será feito pelo Python/SQL Server, verificando a chave de negócio (id_conta_receber).
         """
-        print("✅ Extraindo FatoContasAReceber do PostgreSQL e salvando no Staging File RAW.")
+        print("✅ Extraindo FatoContasAReceber (Full Load) do PostgreSQL e salvando no Staging File RAW.")
         df = pg.get_pandas_df(sql)
         
         if df.empty:
-            raise Exception("A extração do PostgreSQL não retornou dados. Terminando o pipeline.")
+            print("A extração do PostgreSQL não retornou dados. Finalizando o pipeline.")
+            return None # Retorna None para interromper o pipeline
         
         df.to_csv(RAW_STAGING_PATH, index=False)
         print(f"✅ Dados RAW salvos em: {RAW_STAGING_PATH}")
@@ -64,9 +68,11 @@ def etl_fato_contas_receber_v2():
         return RAW_STAGING_PATH
 
 # --------------------------------------------------------------------------------------
-    # --- 2. TRANSFORMAÇÃO & LOOKUP (Lê RAW, Grava TRANSFORMED no Staging File) ---
+    # --- 2. TRANSFORMAÇÃO & LOOKUP ---
     @task
     def transform_and_lookup(raw_staging_path):
+        if raw_staging_path is None: return None
+
         if not os.path.exists(raw_staging_path):
              raise FileNotFoundError(f"Arquivo RAW de Staging não encontrado em {raw_staging_path}")
              
@@ -111,7 +117,7 @@ def etl_fato_contas_receber_v2():
         return TRANSFORMED_STAGING_PATH
 
 # --------------------------------------------------------------------------------------
-    # --- 3. LOAD: SQL Server (Alinhado com PK IDENTITY) ---
+    # --- 3. LOAD: SQL Server (Incremental & Idempotência) ---
     @task
     def load_mssql(transformed_staging_path):
         
@@ -120,9 +126,9 @@ def etl_fato_contas_receber_v2():
             if os.path.exists(RAW_STAGING_PATH): os.remove(RAW_STAGING_PATH)
             if os.path.exists(transformed_staging_path): os.remove(transformed_staging_path)
 
-        if not os.path.exists(transformed_staging_path):
+        if transformed_staging_path is None or not os.path.exists(transformed_staging_path):
              clean_staging_files()
-             raise FileNotFoundError(f"Arquivo TRANSFORMADO de Staging não encontrado em {transformed_staging_path}")
+             return "Carga interrompida: Nenhum dado novo encontrado ou arquivo não existe."
              
         df_final = pd.read_csv(transformed_staging_path)
         rows_to_insert = df_final.to_dict(orient="records")
@@ -135,21 +141,18 @@ def etl_fato_contas_receber_v2():
         conn = mssql.get_conn()
         cursor = conn.cursor()
 
-        # 1. Obter IDs já carregados para Idempotência (usando a chave de negócio)
+        # 1. Obter IDs já carregados (para Idempotência)
         loaded_ids = []
         try:
-             # Consultamos o id_conta_receber, que é a chave de negócio única que queremos filtrar.
              df_loaded = mssql.get_pandas_df("SELECT id_conta_receber FROM FatoContasAReceber;")
-             
              if not df_loaded.empty:
-                 # CORREÇÃO: Garante que os IDs carregados são np.int64 para comparação precisa.
                  loaded_ids = df_loaded['id_conta_receber'].astype(np.int64).tolist()
                  print(f"IDs de negócio já carregados: {len(loaded_ids)} registros.")
              else:
                  print("Tabela FatoContasAReceber vazia.")
-                 
         except Exception as e:
-             print(f"Aviso: Falha ao consultar IDs carregados. Assumindo lista vazia. Erro: {e}", file=sys.stderr)
+             # Este erro é esperado na primeira execução ou se a tabela estiver vazia
+             print(f"Aviso: Falha ao consultar IDs carregados (ignorado). Erro: {e}", file=sys.stderr)
              loaded_ids = []
              
         # 2. Filtrar os registros que ainda não foram carregados
@@ -177,7 +180,7 @@ def etl_fato_contas_receber_v2():
                 id_dim_cliente, 
                 id_dim_tempo_vencimento, 
                 id_dim_tempo_recebimento,
-                id_conta_receber,                   
+                id_conta_receber, 
                 valor_parcela, 
                 valor_original, 
                 valor_atual, 
@@ -185,46 +188,47 @@ def etl_fato_contas_receber_v2():
                 numero_nf
             ) 
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-        """ # 11 placeholders
+        """ 
 
         data_to_insert = []
         for row in rows_to_insert_final:
             id_recebimento = row["id_dim_tempo_recebimento"]
+            # Trata NULL/NaN para colunas INT
             if pd.isna(id_recebimento):
                 id_recebimento = None
             else:
                  id_recebimento = int(id_recebimento)
 
-            # ESTE TUPLE DEVE CONTER EXATAMENTE 11 VALORES
+            # O tuple deve ter exatamente 11 valores, na ordem do INSERT
             data_to_insert.append((
-                # 1. Chaves Substitutas (Foreign Keys)
-                int(row["id_dim_situacao"]),        # 1
-                int(row["id_dim_forma_pagamento"]), # 2
-                int(row["id_dim_cliente"]),         # 3
-                int(row["id_dim_tempo_vencimento"]),# 4
-                id_recebimento,                     # 5
-                
-                # 6. Chave de Negócio de Origem
-                int(row["id_conta_receber"]),       # 6
-                
-                # 7-11. Fatos (Métricas)
-                row["valor_parcela"],               # 7
-                row["valor_original"],              # 8
-                row["valor_atual"],                 # 9
-                row["numero_parcela"],              # 10
-                row["numero_nf"],                   # 11
+                int(row["id_dim_situacao"]), 
+                int(row["id_dim_forma_pagamento"]), 
+                int(row["id_dim_cliente"]), 
+                int(row["id_dim_tempo_vencimento"]), 
+                id_recebimento, 
+                int(row["id_conta_receber"]), 
+                row["valor_parcela"], 
+                row["valor_original"], 
+                row["valor_atual"], 
+                row["numero_parcela"], 
+                row["numero_nf"], 
             ))
-            # O ID da PK (id_fato_contas_receber) FOI INTENCIONALMENTE REMOVIDO DAQUI
 
         # 4. Execução
-        cursor.executemany(insert_sql, data_to_insert)
-        conn.commit()
+        try:
+            cursor.executemany(insert_sql, data_to_insert)
+            conn.commit()
+            rows_affected = cursor.rowcount
+        except Exception as e:
+            conn.rollback()
+            print(f"❌ ERRO durante a inserção na FatoContasAReceber: {e}", file=sys.stderr)
+            raise e 
 
         # 5. Limpeza final
         clean_staging_files()
-        print(f"✅ Arquivos de Staging removidos. {len(rows_to_insert_final)} registros carregados.")
+        print(f"✅ Arquivos de Staging removidos. {rows_affected} registros carregados.")
         
-        return f"{len(rows_to_insert_final)} registros carregados na FatoContasAReceber."
+        return f"{rows_affected} registros carregados na FatoContasAReceber."
 
 
     # ORQUESTRAÇÃO
@@ -233,4 +237,4 @@ def etl_fato_contas_receber_v2():
     load_mssql(transformed_path)
 
 
-etl_fato_contas_receber_v2()
+etl_fato_contas_receber_incremental()
